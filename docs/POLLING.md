@@ -35,6 +35,26 @@ cron. Each iteration it first writes the current Unix time to
 `state/heartbeat.txt`. If it is busy with a long task the heartbeat ages
 and the cron below takes over.
 
+## If Muse restarts
+
+The listener dies when Muse or its VM restarts. Two safeguards cover
+that:
+
+1. **Fallback cron (1 minute).** It reads the heartbeat every minute;
+   if the heartbeat is older than 120 seconds, it polls Telegram itself
+   and answers. Replies keep working, just slower (within about a
+   minute).
+2. **Watchdog cron (5 minutes, job `telegram-listener-watchdog`).** It
+   checks the heartbeat every 5 minutes; if it is older than 600
+   seconds, it spawns a new realtime listener with the same brief. A
+   spawned listener first checks the heartbeat itself: if it is less
+   than 60 seconds old, another listener is already alive and it exits
+   at once, so two listeners never poll at the same time.
+
+Verified by test on 2026-11-10: the live listener was stopped and the
+heartbeat backdated; the watchdog respawned it, and the new listener
+kept polling on its own afterwards.
+
 ## Privacy OFF setup (step by step — do this first)
 
 The tag rule below only works if the bot receives every group message.
