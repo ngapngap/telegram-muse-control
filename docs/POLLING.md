@@ -1,8 +1,10 @@
-# Telegram polling runbook (draft — needs the custom.telegram connection first)
+# Telegram polling runbook
 
 Bot: @YOUR_BOT_USERNAME. Direct polling only, no Cloudflare, no Worker.
 User's Telegram id: YOUR_USER_ID (YOUR_NAME). Private DM chat: YOUR_USER_ID.
-Group: "YOUR_GROUP_NAME", supergroup id YOUR_GROUP_ID (forum supergroup).
+Groups: "YOUR_GROUP_NAME", supergroup id YOUR_GROUP_ID (forum supergroup),
+and a second group, supergroup id YOUR_SECOND_GROUP_ID. Same mention-only
+rule in both groups.
 
 ## Helper
 
@@ -33,19 +35,37 @@ cron. Each iteration it first writes the current Unix time to
 `state/heartbeat.txt`. If it is busy with a long task the heartbeat ages
 and the cron below takes over.
 
+## Privacy OFF setup (step by step — do this first)
+
+The tag rule below only works if the bot receives every group message.
+By default Telegram bots run in privacy mode: they only see messages
+that mention them or are commands. Turn privacy OFF once, in BotFather:
+
+1. Open @BotFather on Telegram and send `/setprivacy`.
+2. Pick your bot from the list.
+3. Tap **Disable**.
+4. Remove the bot from each group, then add it back. This step is
+   required: a privacy change only takes effect for a bot after it is
+   removed and re-added to the group.
+5. Verify: run `getme`. `can_read_all_group_messages` must be `true`.
+   If it is still `false`, repeat step 4.
+
+Do NOT rely on Telegram's privacy mode to do the filtering: mentions
+were not arriving reliably even with privacy ON, which is why the rule
+below lives on our side instead.
+
 ## Group reply rule — mention-only, enforced by the listener (since 2026-11-10 ~12:44)
 
-The user asked for the rule to live on our side, not in Telegram's privacy
-setting: the bot receives every group message (privacy OFF), but replies
-only when the message tags it. Reply to a group message only if ANY of
-these is true: (a) its text contains '@YOUR_BOT_USERNAME', (b) it is a
-reply to one of the bot's own messages (reply_to_message.from.id ==
-YOUR_BOT_ID), (c) it is a command (text starts with '/'). Otherwise ignore
-it silently but still advance the offset past it. The private DM is
-unaffected: reply to every message there. The 1-minute fallback cron
-applies the same rule. This replaces the earlier plan of relying on
-Telegram's privacy mode, because mentions were not arriving reliably even
-with privacy ON.
+The bot receives every group message (privacy OFF), but replies only
+when the message is addressed to it. The check runs in two places — the
+realtime listener and the 1-minute fallback cron — so the rule holds even
+if the listener dies. Reply to a group message only if ANY of these is
+true: (a) its text contains '@YOUR_BOT_USERNAME', (b) it is a reply to
+one of the bot's own messages (reply_to_message.from.id ==
+YOUR_BOT_ID), (c) it is a command (text starts with '/'). Otherwise
+ignore it silently — do NOT reply — but still advance the offset past
+it, so it is not delivered again. The private DM is unaffected: reply
+to every message there.
 
 ## Polling job (every 1 minute — FALLBACK ONLY, since 2026-11-10 ~12:10)
 
@@ -56,7 +76,8 @@ steps below (the listener has died and this run is the fallback).
 
 1. Run `updates` and read the returned updates.
 2. For each update with a `message.text`, only act on messages from
-   `from.id` YOUR_USER_ID, in private chat YOUR_USER_ID or group YOUR_GROUP_ID.
+   `from.id` YOUR_USER_ID, in private chat YOUR_USER_ID or groups
+   YOUR_GROUP_ID, YOUR_SECOND_GROUP_ID.
    Ignore messages from anyone else, and ignore non-text updates and
    `my_chat_member` updates.
 3. Answer as Muse, with the user's full context from memory. Reply with
