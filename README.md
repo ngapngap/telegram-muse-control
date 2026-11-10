@@ -24,24 +24,57 @@ on Telegram, in near-realtime.
 - **Offset**: after handling every returned update, store `max(update_id) + 1`
   with `set-offset`, even for ignored updates.
 
-## The group rule (mention-only, enforced by the listener)
+## Setup — turn privacy OFF (required)
 
-Telegram's privacy mode proved unreliable for mentions, so the rule lives on
-our side instead. The bot receives **every** group message (privacy OFF in
-BotFather, bot removed and re-added once so the change takes effect), but
-replies only when the message:
+The tag rule below only works if the bot actually receives every group
+message. By default Telegram bots run in privacy mode: they only see
+messages that mention them or are commands. Turn privacy OFF once, in
+BotFather:
 
-- contains `@YOUR_BOT_USERNAME`, or
-- replies to one of the bot's own messages, or
-- is a command (text starts with `/`).
+1. Open @BotFather on Telegram and send `/setprivacy`.
+2. Pick your bot from the list.
+3. Tap **Disable**.
+4. Remove the bot from each group, then add it back. This step is
+   required: a privacy change only takes effect for a bot after it is
+   removed and re-added to the group.
+5. Verify: run `getme`. `can_read_all_group_messages` must be `true`.
+   If it is still `false`, repeat step 4.
 
-Untagged group messages are ignored silently (the offset still advances).
-Private chat is unaffected: the bot replies to every message there.
+With privacy OFF, the bot receives every group message — and the
+mention-only rule below decides which ones get a reply. Do NOT rely on
+Telegram's privacy mode to do the filtering: mentions were not arriving
+reliably even with privacy ON, which is why the rule lives on our side.
 
-In a forum supergroup, replies must pass `--thread-id` with the incoming
-message's `message_thread_id`, so the reply lands in the right topic.
-(The General topic is thread `1`, which Telegram rejects on send — omit the
-flag there.)
+## The group rule — reply only when tagged (mention-only)
+
+The bot receives every group message (privacy OFF), but replies only when
+the message is addressed to it. The check runs in two places — the
+realtime listener and the 1-minute fallback cron — so the rule holds even
+if the listener dies. Reply to a group message only if ANY of these is
+true:
+
+- (a) its text contains `@YOUR_BOT_USERNAME` (an @mention), or
+- (b) it is a reply to one of the bot's own messages
+  (`reply_to_message.from.id == YOUR_BOT_ID`), or
+- (c) it is a command (its text starts with `/`).
+
+Otherwise ignore the message silently — do NOT reply — but still advance
+the update offset past it, so it is not delivered again. In the private
+DM the rule does not apply: the bot replies to every message there.
+
+In a forum supergroup, send the reply with `--thread-id` set to the
+incoming message's `message_thread_id`, so the reply lands in the same
+topic. (The General topic is thread `1`, which Telegram rejects on send —
+omit the flag there.)
+
+## Adding a new group
+
+1. Add the bot to the group.
+2. Find the group's chat id (it starts with `-100` for supergroups; a
+   plain negative number is missing that prefix).
+3. Add the chat id to the allowed-chats list in the listener, the fallback
+   cron and `docs/POLLING.md`. Until then the bot sees the messages but
+   ignores them. The same mention-only rule applies automatically.
 
 ## Files
 
@@ -54,8 +87,9 @@ flag there.)
 
 ## Setup notes (from the live install)
 
-- Group: `YOUR_GROUP_NAME`, supergroup `YOUR_GROUP_ID` (forum; messages live in
-  the `Muse` topic, thread `YOUR_TOPIC_THREAD_ID`). A bot that is a group admin receives all
+- Groups: `YOUR_GROUP_NAME` (`YOUR_GROUP_ID`, forum; messages live in
+  the `Muse` topic, thread `YOUR_TOPIC_THREAD_ID`). More groups can be
+  added — see 'Adding a new group' above. A bot that is a group admin receives all
   messages regardless of privacy mode — but only the group creator can
   promote it, so this setup uses privacy OFF instead.
 - Privacy changes in BotFather only take effect for a bot after it is removed
