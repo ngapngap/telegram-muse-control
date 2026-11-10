@@ -76,6 +76,30 @@ omit the flag there.)
    cron and `docs/POLLING.md`. Until then the bot sees the messages but
    ignores them. The same mention-only rule applies automatically.
 
+## If Muse restarts
+
+The realtime listener is a long-running agent: it dies when Muse or its
+VM restarts. Two safeguards cover that, so no message is lost:
+
+1. **Fallback cron (1 minute).** Every minute it reads the listener's
+   heartbeat (`state/heartbeat.txt`). If the heartbeat is older than 120
+   seconds, the listener is presumed dead and the cron polls Telegram
+   itself and answers. Replies keep working, just slower (within about
+   a minute instead of ~5–15 seconds).
+2. **Watchdog cron (5 minutes).** Every 5 minutes it checks the same
+   heartbeat. If it is older than 600 seconds (10 minutes), it spawns a
+   new realtime listener with the same brief, restoring fast replies.
+   A spawned listener first checks the heartbeat itself: if it is less
+   than 60 seconds old, another listener is already alive and it exits
+   at once, so two listeners can never poll at the same time (Telegram
+   allows only one active `getUpdates` consumer).
+
+Verified by test on 2026-11-10: the live listener was stopped and the
+heartbeat backdated; the watchdog respawned it, and the new listener
+kept polling on its own afterwards. If replies ever stop entirely,
+check the heartbeat age — and if it is stale, the fallback cron is
+already answering within a minute.
+
 ## Files
 
 | File | What it is |
