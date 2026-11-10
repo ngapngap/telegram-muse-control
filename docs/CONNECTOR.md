@@ -49,6 +49,21 @@ python3 ~/workspace/custom-connectors/custom.telegram/bin/telegram.py getme
 
 - Read the `result.username`, `result.id` and `result.can_read_all_group_messages` fields. A `false` value for `can_read_all_group_messages` means the bot only sees group messages that mention it or are commands, unless privacy mode is disabled in BotFather.
 
+## Privacy mode — turn it OFF (required for the group rule)
+
+The group reply rule in `POLLING.md` only works if the bot receives
+every group message, so privacy mode must be OFF. Do it once, in
+BotFather:
+
+1. Open @BotFather on Telegram and send `/setprivacy`.
+2. Pick your bot from the list.
+3. Tap **Disable**.
+4. Remove the bot from each group, then add it back. This step is
+   required: a privacy change only takes effect for a bot after it is
+   removed and re-added to the group.
+5. Verify with `getme`: `can_read_all_group_messages` must be `true`.
+   If it is still `false`, repeat step 4.
+
 ## Read new messages
 
 - `updates` is a read that returns pending updates as JSON. With no `--offset` it reads the stored offset from `state/offset.txt`.
@@ -93,7 +108,7 @@ python3 ~/workspace/custom-connectors/custom.telegram/bin/telegram.py send --cha
 
 - No webhook is set on this bot. Do not call `setWebhook`, because it stops `getUpdates` from returning updates.
 
-- Sending files, photos and other media is untested. Text messages are the only verified operation.
+- Text messages are verified. `send-photo` (multipart upload of a local image file) is also verified.
 
 ## Related skills
 
