@@ -4,7 +4,9 @@ Control Muse entirely through a Telegram bot — no feature restrictions, in
 private chat and in groups. Muse reads your messages from the bot and replies
 on Telegram, in near-realtime.
 
-> This is a personal setup built on 2026-11-10. The helper is designed to run
+> This is a personal setup built on 2026-11-10. Hook design since
+> 2026-11-19 (see below); the listener + cron design it replaced is kept
+> as rollback. The helper is designed to run
 > inside Muse's own environment: it reads the bot token from Muse's registered
 > credential through a surrogate, so **no token ever appears in this repo**,
 > in arguments, or in logs. Do not paste a bot token into any file here.
@@ -14,15 +16,24 @@ on Telegram, in near-realtime.
 - **Bot**: `@YOUR_BOT_USERNAME` (Telegram Bot API, long-poll `getUpdates`).
   No webhook is set — webhook and long-poll are mutually exclusive, and this
   setup polls.
-- **Realtime listener**: a long-running agent loops
-  `updates --timeout 30` and replies in ~5–15 seconds. It writes a heartbeat
-  to `state/heartbeat.txt` every loop.
-- **Fallback cron**: runs every 1 minute, but exits silently when the
-  listener heartbeat is less than 120 seconds old, so the two never poll at
-  the same time. Telegram allows only one active `getUpdates` consumer —
-  concurrent callers collide with `409 Conflict`.
-- **Offset**: after handling every returned update, store `max(update_id) + 1`
-  with `set-offset`, even for ignored updates.
+- **Event hook `telegram-inbox`** (since 2026-11-19, current design): a Muse
+  hook runs `hooks/telegram-inbox.sh` every 30 seconds. The script long-polls
+  `updates --timeout 25` under `state/poll.lock`, filters with the group rule
+  below, queues qualifying messages to `~/hooks/state/telegram/inbox.jsonl`,
+  then advances the offset — and wakes a worker agent ONLY when a message was
+  queued. When idle it costs ~0 tokens. The worker (prompt in
+  `hooks/telegram-inbox-worker.md`) drains the inbox atomically, replies on
+  Telegram, and dedupes via `sent-ids.txt`.
+- **Why a hook, not a listener**: the previous always-on listener + 1-minute
+  cron burned ~500M tokens/day just staying alive (~3.5B tokens in 7 days,
+  plus the listener's own unrecorded burn). The hook costs ~0 when idle and
+  ~200k tokens per answered message (measured 2026-11-19).
+- **Runs inside Muse**: the hook is a Muse event hook, not a standalone
+  daemon — it only works in an environment with Muse's hook runtime.
+- **Single consumer + offset**: Telegram allows only one active `getUpdates`
+  consumer — concurrent callers collide with `409 Conflict`. All polling goes
+  through `state/poll.lock`. After handling every returned update, store
+  `max(update_id) + 1` with `set-offset`, even for ignored updates.
 
 ## Setup — turn privacy OFF (required)
 
@@ -48,9 +59,9 @@ reliably even with privacy ON, which is why the rule lives on our side.
 ## The group rule — reply only when tagged (mention-only)
 
 The bot receives every group message (privacy OFF), but replies only when
-the message is addressed to it. The check runs in two places — the
-realtime listener and the 1-minute fallback cron — so the rule holds even
-if the listener dies. Reply to a group message only if ANY of these is
+the message is addressed to it. The check runs in two places — the hook
+script's filter and the worker's re-check before sending — so the rule holds
+even if one of them is bypassed. Reply to a group message only if ANY of these is
 true:
 
 - (a) its text contains `@YOUR_BOT_USERNAME` (an @mention), or
@@ -72,41 +83,49 @@ omit the flag there.)
 1. Add the bot to the group.
 2. Find the group's chat id (it starts with `-100` for supergroups; a
    plain negative number is missing that prefix).
-3. Add the chat id to the allowed-chats list in the listener, the fallback
-   cron and `docs/POLLING.md`. Until then the bot sees the messages but
+3. Add the chat id to `ALLOWED_CHATS` in `hooks/telegram-inbox.sh`, to the
+   worker prompt in `hooks/telegram-inbox-worker.md`, and to
+   `docs/POLLING.md`. Until then the bot sees the messages but
    ignores them. The same mention-only rule applies automatically.
 
 ## If Muse restarts
 
-The realtime listener is a long-running agent: it dies when Muse or its
-VM restarts. Two safeguards cover that, so no message is lost:
+The hook is re-run by the runtime every 30 seconds, so there is no
+long-running listener to die on a restart. If replies stop, check that
+the hook is still enabled and that its last run was silent with no
+error. Messages already queued in `inbox.jsonl` are picked up by the
+next wake — a stale `processing-*.jsonl` file older than 600 seconds is
+requeued automatically.
 
-1. **Fallback cron (1 minute).** Every minute it reads the listener's
-   heartbeat (`state/heartbeat.txt`). If the heartbeat is older than 120
-   seconds, the listener is presumed dead and the cron polls Telegram
-   itself and answers. Replies keep working, just slower (within about
-   a minute instead of ~5–15 seconds).
-2. **Watchdog cron (5 minutes).** Every 5 minutes it checks the same
-   heartbeat. If it is older than 600 seconds (10 minutes), it spawns a
-   new realtime listener with the same brief, restoring fast replies.
-   A spawned listener first checks the heartbeat itself: if it is less
-   than 60 seconds old, another listener is already alive and it exits
-   at once, so two listeners can never poll at the same time (Telegram
-   allows only one active `getUpdates` consumer).
+**Rollback to the previous design.** Before 2026-11-19 the bridge ran
+on a realtime listener agent plus two crons. That setup is kept as the
+fallback: disable the hook, then re-enable the `telegram-poll-replies`
+(1 minute) and `telegram-listener-watchdog` (5 minutes) crons. The
+fallback cron reads the listener heartbeat (`state/heartbeat.txt`) and
+polls Telegram itself when it is older than 120 seconds; the watchdog
+spawns a new listener when it is older than 600 seconds. A spawned
+listener first checks the heartbeat itself: if it is less than 60
+seconds old, another listener is already alive and it exits at once, so
+two listeners can never poll at the same time (Telegram allows only one
+active `getUpdates` consumer).
 
 Verified by test on 2026-11-10: the live listener was stopped and the
 heartbeat backdated; the watchdog respawned it, and the new listener
-kept polling on its own afterwards. If replies ever stop entirely,
-check the heartbeat age — and if it is stale, the fallback cron is
-already answering within a minute.
+kept polling on its own afterwards. Verified 2026-11-19: a queued test
+message woke the worker, the reply was delivered, and the inbox was
+drained clean. If replies ever stop entirely, check the hook logs first —
+and if the hook is down, the rollback crons above are already answering
+within a minute.
 
 ## Files
 
 | File | What it is |
 | --- | --- |
 | `bin/telegram.py` | Bot API helper: `getme`, `updates [--timeout N]`, `send`, `send-photo`, `chat-member`, `chat-admins`, `webhook-info`, `get-offset`, `set-offset` |
+| `hooks/telegram-inbox.sh` | Hook script: polls `getUpdates`, filters with the group rule, queues to the inbox, wakes the worker only on real messages |
+| `hooks/telegram-inbox-worker.md` | Worker prompt: how the woken agent drains the inbox and replies |
 | `docs/CONNECTOR.md` | Connector doc: credential setup, commands, error recovery |
-| `docs/POLLING.md` | Polling runbook: listener, fallback cron, the group rule |
+| `docs/POLLING.md` | Polling runbook: hook design, worker, group rule, rollback |
 | `connector.yaml` | Muse custom-connector descriptor (`custom.telegram`) |
 
 ## Setup notes (from the live install)
@@ -120,5 +139,8 @@ already answering within a minute.
   from the group and re-added.
 - Verified 2026-11-10: a tagged group message got its reply in the topic;
   an untagged one got no reply, by design. DM replies land in ~6 seconds.
+- Verified 2026-11-19: the hook design — a queued test message woke the
+  worker, the reply was delivered to the DM, and one wake cost ~202k
+  tokens. Idle polling costs ~0 tokens.
 - Video generation is not available for this account in its country/region —
   the bot offers an image instead when asked for a video.

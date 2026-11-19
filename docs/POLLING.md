@@ -2,9 +2,44 @@
 
 Bot: @YOUR_BOT_USERNAME. Direct polling only, no Cloudflare, no Worker.
 User's Telegram id: YOUR_USER_ID (YOUR_NAME). Private DM chat: YOUR_USER_ID.
-Groups: "YOUR_GROUP_NAME", supergroup id YOUR_GROUP_ID (forum supergroup),
-and a second group, supergroup id YOUR_SECOND_GROUP_ID. Same mention-only
-rule in both groups.
+Group: "YOUR_GROUP_NAME", supergroup id YOUR_GROUP_ID (forum supergroup).
+Second group (added 2026-11-10 ~14:13): "YOUR_SECOND_GROUP_NAME", supergroup id
+YOUR_SECOND_GROUP_ID. Same mention-only rule in both groups.
+
+## Current design (since 2026-11-19) — hook, not a listener agent
+
+Telegram now runs on the `telegram-inbox` event hook, NOT on the realtime
+listener subagent or the 1-minute fallback cron. Reason: the old setup
+burned ~500M tokens/day — the two Telegram crons alone cost 3.51B tokens
+in 7 days (Nov 12–19), and the listener subagent added roughly 3B more
+(~20k poll turns, context growing to 272k tokens), most of it unrecorded
+in the token table. The hook costs ~0 tokens when idle.
+
+- **Hook script:** `hooks/telegram-inbox.sh` (installed as
+  `~/hooks/scripts/telegram-inbox.sh`), poll every 30s,
+  `telegram.py updates --timeout 25` under `state/poll.lock` (single
+  getUpdates consumer). It filters exactly like the old listener (user
+  YOUR_USER_ID only; DM replies to everything; groups only on tag, reply to
+  the bot, or command), appends qualifying messages to
+  `~/hooks/state/telegram/inbox.jsonl`, then advances the offset with
+  `set-offset` to max(update_id)+1. It wakes a worker ONLY when a new
+  message was queued (or an unprocessed backlog exists); otherwise silent.
+- **Worker:** spawned by the hook only on wake. Drains the inbox
+  atomically (flock, move to `processing-<ts>.jsonl`), replies as Muse in
+  Vietnamese via `telegram.py send` / `send-photo`, dedupes with
+  `~/hooks/state/telegram/sent-ids.txt`, deletes the processing file when
+  done. It never calls getUpdates and never touches the offset.
+- **Disabled, not deleted (2026-11-19):** crons `telegram-poll-replies`
+  (1m) and `telegram-listener-watchdog` (5m); the listener subagent was
+  closed the same day.
+- **Rollback:** `hooks.disable telegram-inbox`, then re-enable the two
+  crons above. The watchdog respawns a listener within ~5 minutes
+  (heartbeat stale > 600s). Zalo is untouched and still uses the old
+  listener + cron design.
+
+The listener / fallback-cron / watchdog sections below describe the
+PREVIOUS design, kept for rollback reference. The group reply rule and
+the privacy-OFF setup still apply unchanged.
 
 ## Helper
 
